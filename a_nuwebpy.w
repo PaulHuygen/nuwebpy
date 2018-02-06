@@ -1,10 +1,109 @@
 m4_include(inst.m4)m4_dnl
-\documentclass[twoside]{artikel3}
+\documentclass[twoside]{rapport3}
 \newcommand{\theTitle}{m4_doctitle}
 \newcommand{\theAuthor}{m4_author}
 \input{thelatexheader.tex}
 \begin{document}
 \maketitle
+
+\chapter{The program}
+\label{chap:the-program}
+
+\section{Invocation of the program; arguments}
+\label{sec:invocation}
+
+The program can be started with a command like:
+\begin{alltt}
+  nuweb.py [flags] nuweb-file
+\end{alltt}
+
+\begin{description}
+\item[-h:] Print usage message.
+\item[-r, --hyperlinks:] Use Hyperlinks.
+\item[-t, --no-tex:] No \TeX{} .
+\end{description}
+
+The function that writes a usage message:
+
+@d usage-message function @{@%
+def usage():
+@%    sys.stderr.write('%s $Revision: 8a3bacdfb376 $\n' % sys.argv[0])
+    sys.stderr.write('usage: nuweb.py [flags] nuweb-file\n')
+    sys.stderr.write('flags:\n')
+    sys.stderr.write('-h, --help:              '
+        + 'output this message\n')
+    sys.stderr.write('-r, --hyperlinks:        '
+        + 'generate hyperlinks\n')
+    sys.stderr.write('-t, --no-tex:            '
+        + 'don\'t generate the LaTeX output\n')
+@| @}
+
+
+
+Other flags from the original Nuweb have not yet been implemented.
+The following two variables remember the flags that have been used:
+
+@d  option flag variables @{@%
+global hyperlinks
+hyperlinks = False
+generate_document = True
+@| hyperlinks generate_document @}
+
+
+Parse the command-line options using the \verb|getopt| package.
+
+@d packages list @{ getopt@| getopt@}
+
+
+
+@d parse commandline options @{@%
+@< option flag variables @>
+
+@< usage-message function @>
+
+try:
+    opts, args = getopt.getopt\
+    (sys.argv[1:],
+        "hrt",
+         ["help", "hyperlinks", "no-tex", ])
+except getopt.GetoptError:
+    usage()
+    sys.exit(1)
+
+@|opts args @}
+
+Check out the options:
+
+@d parse commandline options @{@%
+for o, v in opts:
+    if o in ("-h", "--help"):
+        usage()
+        sys.exit(0)
+    elif o in ("-r", "--hyperlinks"):
+        hyperlinks = True
+    elif o in ("-t", "--no-tex"):
+        generate_document = False
+@| @}
+
+Put the name of the nuweb file in  \verb|input_filename|. Append suffix \verb|.w| to it if the user has not done that.
+
+@d parse commandline options @{@%
+if len(args) != 1:
+    usage()
+    sys.exit(1)
+arg = args[0]
+
+if arg[-2:] == ".w":
+    input_filename = arg
+    basename = arg[:-2]
+else:
+    input_filename = arg + ".w"
+    basename = arg
+
+@|input_filename @}
+
+
+
 
 @o nuweb.py @{@%
 #!/usr/bin/python
@@ -23,7 +122,13 @@ m4_include(inst.m4)m4_dnl
 #  write to the Free Software Foundation, 59 Temple Place - Suite
 #  330, Boston, MA 02111-1307, USA.
 
-import getopt, re, sys, tempfile, time
+@%import getopt, re, sys, tempfile, time
+import re, tempfile, time, sys,@< packages list @>
+
+@| @}
+
+@o nuweb.py @{@%
+@% @< global variables in nuweb.py @>
 
 #-----------------------------------------------------------------------
 # Notes
@@ -1063,50 +1168,7 @@ def read_aux(path):
 
 def main():
 
-    global hyperlinks
-
-    generate_document = True
-
-    def usage():
-	sys.stderr.write('%s $Revision: 8a3bacdfb376 $\n' % sys.argv[0])
-	sys.stderr.write('usage: nuweb.py [flags] nuweb-file\n')
-	sys.stderr.write('flags:\n')
-	sys.stderr.write('-h, --help:              '
-			 + 'output this message\n')
-	sys.stderr.write('-r, --hyperlinks:        '
-			 + 'generate hyperlinks\n')
-	sys.stderr.write('-t, --no-tex:            '
-			 + 'don\'t generate the LaTeX output\n')
-
-    try:
-        opts, args = getopt.getopt\
-	    (sys.argv[1:],
-	     "hrt",
-	     ["help", "hyperlinks", "no-tex", ])
-    except getopt.GetoptError:
-        usage()
-        sys.exit(1)
-
-    for o, v in opts:
-	if o in ("-h", "--help"):
-	    usage()
-	    sys.exit(0)
-        elif o in ("-r", "--hyperlinks"):
-            hyperlinks = True
-        elif o in ("-t", "--no-tex"):
-            generate_document = False
-
-    if len(args) != 1:
-        usage()
-        sys.exit(1)
-    arg = args[0]
-
-    if arg[-2:] == ".w":
-        input_filename = arg
-        basename = arg[:-2]
-    else:
-        input_filename = arg + ".w"
-        basename = arg
+    @< parse commandline options @>
 
     read_nuweb(input_filename)
     if generate_document:
