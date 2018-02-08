@@ -23,8 +23,6 @@ The program can be started with a command like:
 \item[-t, --no-tex:] No \TeX{} .
 \end{description}
 
-The function that writes a usage message:
-
 @d usage-message function @{@%
 def usage():
 @%    sys.stderr.write('%s $Revision: 8a3bacdfb376 $\n' % sys.argv[0])
@@ -38,25 +36,22 @@ def usage():
         + 'don\'t generate the LaTeX output\n')
 @| @}
 
-
-
 Other flags from the original Nuweb have not yet been implemented.
 The following two variables remember the flags that have been used:
 
-@d  option flag variables @{@%
+@d  option flag variables @{
 global hyperlinks
 hyperlinks = False
 generate_document = True
-@| hyperlinks generate_document @}
 
+@| hyperlinks generate_document @}
 
 Parse the command-line options using the \verb|getopt| package.
 
 @d packages list @{ getopt@| getopt@}
 
 
-
-@d parse commandline options @{@%
+@d parse commandline options @{
 @< option flag variables @>
 
 @< usage-message function @>
@@ -102,7 +97,170 @@ else:
 
 @|input_filename @}
 
+\section{Digesting a nuweb file}
+\label{sec:digest-nuweb-file}
 
+A nuweb file consists essentially of an alternation of (\LaTeX{}) texts and
+code-fragments. The function \verb|read_nuweb| converts these
+text-chunks and code-chunks in an alternation of objects of the resp.\
+\verb|DocumentElements| and \verb|DocumentElement| class and
+concatenates these in a list named \verb|document|. Apart from the
+texts and code-fragments, there are the instructions \verb|@@`'%|,
+\verb|@@i| and the index requests that have to be taken care of.
+
+@d global variables in nuweb.py @{@%
+@% # In 'document', we have the input document as a sequence of
+@% # DocumentElements.
+document = []
+@|document @}
+
+To open and read the input file, the function \verb|read_nuweb| uses a
+subclass of the \verb|File| class, named \verb|InputFile|. This
+subclass takes care of the \verb|@@`'%|
+characters, so we don't have to bother with them here.
+The function
+reads the nuweb file line by line. To read the file, the function uses
+\verb||InputFile|, a subclass of \verb|file| that skips comment tails
+(from \verb|@@`'%| until/including end-of-line).
+
+
+@d functions in nuweb.py @{
+def read_nuweb(path):
+    """Reads the .w file specified at 'path' (and any other files
+    included using @@i), forming a sequence of DocumentElements held in
+    'document'."""
+    global document
+    try:
+        input = InputFile(path, 'r')
+    except:
+        sys.stderr.write("couldn't open %s for input.\n" % path)
+        sys.exit(1)
+    @< parse the input text @>
+    sys.stderr.write("file %s has %d lines.\n"
+                     % (input.path, input.line_number))
+    input.close()
+@| @}
+
+
+In a loop, the function reads a chunk of text until it encounters a
+macro definition or an index request (like \verb|@@f|). Each chunk of
+text is packed in an object of class \verb|DocumentElement| that is
+appended to a list \verb|document|. Macro definitions are stored in
+objects of class \verb|CodeElement| and appended to \verb|document| as
+well.
+
+I do not yet completely understand how the function handles \verb|@@i| commands.
+
+The following regexps find \verb|@@i| commands and macro definition commands. 
+
+@d regexps in read\_nuweb @{
+look_for_includefile = re.compile(r'(?<!@@)@@i\s*(?P<filename>\S*)')
+look_for_begin_codefragment = re.compile(r'(?<!@@)@@[oOdD]')
+look_for_index_request = re.compile(r'\s*@@[fmu]\s*')
+@|look_for_includefile  look_for_begin_codefragment @}
+
+
+@d parse the input text @{
+@< regexps in read\_nuweb @>
+latex_text = ''
+while True:
+    line = input.readline()
+    if input.at_end:
+        break
+    if look_for_includefile.search(line):
+        m = re.match(r'@@i\s*(?P<filename>\S*)', line)
+        read_nuweb(m.group('filename'))
+    elif look_for_begin_codefragment.search(line):
+        @< digest a macro definition @>
+    elif look_for_index_request.match(line):
+        # To be recognised, an index request needs to be on a line
+        # of its own.
+        @< digest an index request @>
+    else:
+        latex_text = latex_text + line
+# Save the last LaTeX text
+document.append(Text(latex_text))
+@| @}
+
+
+When a macro-definition (like \verb|@@d|) has been encountered, store
+the \LaTeX{} text before the definition, read the complete definition
+and store it in a \verb|CodeElement| object. Start a
+\verb|latex_text| block to catch the following \LaTeX{} text.
+
+@d digest a macro definition @{@%
+m = re.match(r'(?s)(?P<text>.*)(?P<start>(?<!@@)@@[oOdD].*)', line)
+latex_text = latex_text + m.group('text')
+# Save the LaTeX text
+document.append(Text(latex_text))
+element_text = ''
+line = m.group('start')
+# We have to avoid premature termination at a line
+# containing '@@@@}' (unusual, but nuweb.w has this).
+while not re.search(r'(?<!@@)@@}', line):
+    element_text = element_text + line
+    line = input.readline()
+    if input.at_end:
+        sys.stderr.write("file %s ended within fragment.\n"
+                         % input.path)
+        sys.exit(1)
+n = re.match(r'(?P<fragment>.*@@})(?P<text>.*)', line)
+element_text = element_text + n.group('fragment')
+document.append(CodeElement.factory(element_text))
+latex_text = n.group('text')
+@| @}
+
+
+When an index request is found (command \verb|@@f|, \verb|@@m| or
+\verb|@@u| at the beginning of a line), store the \LaTeX{} code before
+the request in a \verb|DocumentElement| and store the request itself
+in an \verb|Index| object. 
+
+@d digest an index request @{@%
+document.append(Text(latex_text))
+latex_text = ""
+n = re.match(r'\s*@@(?P<index>[fmu])\s*', line)
+document.append(Index.factory(n.group('index')))
+@| @}
+
+
+
+
+\subsection{A class to read the input-file}
+\label{sec:inputfileclass}
+
+@d classes for file i/o @{@%
+class InputFile(file):
+    """Supports iteration over an input file, eating all occurrences
+    of at-percent (but not at-at-percent) from the occurrence's
+    position to the newline (or end-of-file).
+
+    Because a commented-out line can appear to have zero length,
+    end-of-file is indicated by the public instance variable
+    'at_end'."""
+
+    at_percent_matcher = re.compile(r'(?s)(?<!@@)@@`'%.*$')
+
+    def __init__(self, path, mode='r'):
+        file.__init__(self, path, mode)
+        self.at_end = False
+        self.line_number = 0
+        self.path = path
+
+    def readline(self):
+        l = file.readline(self)
+        self.at_end = len(l) == 0
+        self.line_number = self.line_number + 1
+        return re.sub(InputFile.at_percent_matcher, '', l)
+@| @}
+
+\section{Miscellaneous}
+\label{sec:misc}
+
+
+
+\section{Remainder of the program}
+\label{sec:remainder}
 
 
 @o nuweb.py @{@%
@@ -125,10 +283,6 @@ else:
 @%import getopt, re, sys, tempfile, time
 import re, tempfile, time, sys,@< packages list @>
 
-@| @}
-
-@o nuweb.py @{@%
-@% @< global variables in nuweb.py @>
 
 #-----------------------------------------------------------------------
 # Notes
@@ -142,6 +296,7 @@ import re, tempfile, time, sys,@< packages list @>
 #-----------------------------------------------------------------------
 # Globals
 #-----------------------------------------------------------------------
+@< global variables in nuweb.py @>
 
 # In 'document', we have the input document as a sequence of
 # DocumentElements.
@@ -168,29 +323,9 @@ need_to_rerun = False
 #-----------------------------------------------------------------------
 # Nuweb file i/o
 #-----------------------------------------------------------------------
+@< classes for file i/o @>
 
-class InputFile(file):
-    """Supports iteration over an input file, eating all occurrences
-    of at-percent (but not at-at-percent) from the occurrence's
-    position to the newline (or end-of-file).
 
-    Because a commented-out line can appear to have zero length,
-    end-of-file is indicated by the public instance variable
-    'at_end'."""
-
-    at_percent_matcher = re.compile(r'(?s)(?<!@@)@@`'%.*$')
-
-    def __init__(self, path, mode='r'):
-        file.__init__(self, path, mode)
-        self.at_end = False
-        self.line_number = 0
-        self.path = path
-
-    def readline(self):
-        l = file.readline(self)
-        self.at_end = len(l) == 0
-        self.line_number = self.line_number + 1
-        return re.sub(InputFile.at_percent_matcher, '', l)
 
 class OutputCodeFile:
     """The contents are written to a temporary file (nw* in the
@@ -1065,64 +1200,9 @@ class IdentifierIndex(Index):
 # Main and utilities
 #-----------------------------------------------------------------------
 
-def read_nuweb(path):
-    """Reads the .w file specified at 'path' (and any other files
-    included using @@i), forming a sequence of DocumentElements held in
-    'document'."""
-    global document
+@< functions in nuweb.py @>
 
-    try:
-        input = InputFile(path, 'r')
-    except:
-        sys.stderr.write("couldn't open %s for input.\n" % path)
-        sys.exit(1)
-
-    latex_text = ''
-    while True:
-        line = input.readline()
-        if input.at_end:
-            break
-        if re.search(r'(?<!@@)@@i\s*(?P<filename>\S*)', line):
-            m = re.match(r'@@i\s*(?P<filename>\S*)', line)
-            read_nuweb(m.group('filename'))
-        elif re.search(r'(?<!@@)@@[oOdD]', line):
-            m = re.match(r'(?s)(?P<text>.*)(?P<start>(?<!@@)@@[oOdD].*)', line)
-            latex_text = latex_text + m.group('text')
-            # Save the LaTeX text
-            document.append(Text(latex_text))
-            element_text = ''
-            line = m.group('start')
-            # We have to avoid premature termination at a line
-            # containing '@@@@}' (unusual, but nuweb.w has this).
-            while not re.search(r'(?<!@@)@@}', line):
-                element_text = element_text + line
-                line = input.readline()
-                if input.at_end:
-                    sys.stderr.write("file %s ended within fragment.\n"
-                                     % input.path)
-                    sys.exit(1)
-            n = re.match(r'(?P<fragment>.*@@})(?P<text>.*)', line)
-            element_text = element_text + n.group('fragment')
-            document.append(CodeElement.factory(element_text))
-            latex_text = n.group('text')
-        elif re.match(r'\s*@@[fmu]\s*', line):
-            # To be recognised, an index request needs to be on a line
-            # of its own.
-            # Save the LaTeX text
-            document.append(Text(latex_text))
-            latex_text = ""
-            n = re.match(r'\s*@@(?P<index>[fmu])\s*', line)
-            document.append(Index.factory(n.group('index')))
-        else:
-            latex_text = latex_text + line
-    # Save the last LaTeX text
-    document.append(Text(latex_text))
-
-    sys.stderr.write("file %s has %d lines.\n"
-                     % (input.path, input.line_number))
-
-    input.close()
-
+    
 def read_aux(path):
     """LaTeX generates <basename>.aux, which contains (inter alia) the
     page on which each \label{} occurs. Nuweb generates a label for
@@ -1169,6 +1249,52 @@ def read_aux(path):
 def main():
 
     @< parse commandline options @>
+@%    global hyperlinks
+@%
+@%    generate_document = True
+@%
+@%    @< usage-message function @>
+@%
+@%@%    def usage():
+@%@%        sys.stderr.write('%s $Revision: 8a3bacdfb376 $\n' % sys.argv[0])
+@%@%        sys.stderr.write('usage: nuweb.py [flags] nuweb-file\n')
+@%@%        sys.stderr.write('flags:\n')
+@%@%        sys.stderr.write('-h, --help:              '
+@%@%                 + 'output this message\n')
+@%@%        sys.stderr.write('-r, --hyperlinks:        '
+@%@%                 + 'generate hyperlinks\n')
+@%@%        sys.stderr.write('-t, --no-tex:            '
+@%@%                 + 'don\'t generate the LaTeX output\n')
+@%
+@%    try:
+@%        opts, args = getopt.getopt\
+@%            (sys.argv[1:],
+@%            "hrt",
+@%            ["help", "hyperlinks", "no-tex", ])
+@%    except getopt.GetoptError:
+@%        usage()
+@%        sys.exit(1)
+@%
+@%    for o, v in opts:
+@%        if o in ("-h", "--help"):
+@%            usage()
+@%            sys.exit(0)
+@%        elif o in ("-r", "--hyperlinks"):
+@%            hyperlinks = True
+@%        elif o in ("-t", "--no-tex"):
+@%            generate_document = False
+@%
+@%    if len(args) != 1:
+@%        usage()
+@%        sys.exit(1)
+@%    arg = args[0]
+@%
+@%    if arg[-2:] == ".w":
+@%        input_filename = arg
+@%        basename = arg[:-2]
+@%    else:
+@%        input_filename = arg + ".w"
+@%        basename = arg
 
     read_nuweb(input_filename)
     if generate_document:
