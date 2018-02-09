@@ -5,6 +5,7 @@ m4_include(inst.m4)m4_dnl
 \input{thelatexheader.tex}
 \begin{document}
 \maketitle
+\tableofcontents
 
 \chapter{The program}
 \label{chap:the-program}
@@ -99,6 +100,454 @@ else:
 
 \section{Digesting a nuweb file}
 \label{sec:digest-nuweb-file}
+
+\subsection{Text-elements and code-elements}
+\label{sec:code-text-pieces}
+
+A nuweb file consists essentially of an alternation of (\LaTeX{}) texts and
+code-fragments. The nuweb program dis-assembles the input nuweb file
+and puts each chunk of text or code in an object of a sub-class of 
+\verb|DocumentElement|. 
+
+@d DocumentElement class and children @{@%
+class DocumentElement():
+    """The abstract root of the element classes that make up the
+    document. The document is a sequence of Text, Code and Index
+    elements."""
+    def generate_code(self):
+        pass
+    def generate_latex(self, output):
+        output.write(self.text)
+    def matches(self, identifier):
+        return False
+    def defined_by(self):
+        """Returns a list of other Fragments with the same name, ie
+        which taken together define the whole fragment."""
+        return []
+    def referenced_in(self):
+        """Returns a list of CodeElements which reference this
+        Fragment."""
+        return []
+    def used_identifiers(self):
+        """Returns a list of the identifier definitions made by this
+        CodeElement and their users: [[identifier, [element]]]."""
+        return []
+    def uses_identifiers(self):
+        """Returns a list of all the identifier definitions made by
+        other CodeElements and used in this one:
+        [[identifier-text, [element]]]."""
+        return []
+
+@|DocumentElement @}
+
+
+Chunks of \LaTeX{} text are simple to handle. They are just stored in
+objects in the reading phase and written out (using method
+\verb|generate_latex|) in the document output phase. While reading
+from the input-file, convert double at-characters into single at-characters.
+
+@d DocumentElement class and children @{@%
+class Text(DocumentElement):
+    """Contains LaTeX text from the original nuweb source file."""
+    def __init__(self, text):
+        self.text = re.sub(r'@@@@', '@@', text)
+@|Text @}
+
+
+@d DocumentElement class and children @{
+
+@< the CodeElement class @>
+@% @< subclasses of the CodeElement class @>
+
+
+@| @}
+
+
+Chunks of code are more complicated. We have the \verb|CodeElement|
+class in which we store the following
+properties of a chunk of code:
+
+\begin{description}
+\item[Nature :] is it a macro or a direct part of the output-file.
+\item[Name :] of the file or the macro.
+\item[Lines :] The code itself.
+\item[Identifiers :] The list of identifiers defined by the element
+  (expressed as \verb|[[identifier-text, Identifier]]|)
+\item[Literal text :] the joined content of the LiteralLines (to speed
+    up identifier search).
+\item[Splittable :] Whether the text may be split over a page boundary.
+\end{description}
+
+To split up the code chunk into it's elements, we can use the
+following regexp \verb|element_matcher|. When it matches the following
+elements are available in the match-group:
+
+\begin{description}
+\item[kind :] \verb|o|, \verb|O|, \verb|d| or \verb|D| (file or
+  macro).
+\item[name :] filename or macro-name.
+\item[text :] The chunk of code.
+\item[identifiers :] List of the identifiers (found between \verb+@@|+ and \verb|@@}|).
+\end{description}
+
+@d regexp element\_matcher to split up a chunk of code @{@%
+# Matches a CodeElement for factory(). Take care not to recognise
+# '@@@@|' or terminate early on "@@@@}" (unusual, but occurs in
+# nuweb.w).
+element_matcher = re.compile(r'(?s)'
+                             + r'@@(?P<kind>[oOdD])'
+                             + r'\s*'
+                             + r'(?P<name>.*?)'
+                             + r'@@{(?P<text>.*?)'
+                             + r'((?<!@@)@@\|(?P<identifiers>.*))?'
+                             + r'(?<!@@)@@}')
+
+@|element_matcher @}
+
+The \verb|CodeElement| class has separate subclasses \verb|File| and
+\verb|Fragment| to chunks of code that belong directly to a file
+resp. define macro's.
+
+
+@d the CodeElement class @{@%
+class CodeElement(DocumentElement):
+    """May be a File or a Fragment.
+    - 'name' is either the file name or the definition name.
+    - 'lines' is the code (scrap) content, which is a list of CodeLines.
+    - 'identifiers' is a list of the identifiers defined by the element
+             expressed as [[identifier-text, Identifier]].
+    - 'literal_text' is the joined content of the LiteralLines (to speed
+             up identifier search).
+    - 'splittable' is True if the text is allowed to be split over a
+             page boundary in the printed document (otherwise a minipage
+             environment is used to prevent splitting)."""
+    @< variables in the CodeElement class @>
+    @< methods in the CodeElement class @>
+@|CodeElement @}
+
+The input file reader extracts the complete text of a chunk of code
+(from the \verb|@@[oOdD| instruction to the finishing \verb|@@}|) and 
+and generates a new object of one of the
+subclasses of \verb|CodeElement| with the following ``factory''
+method. 
+
+@d methods in the CodeElement class @{@%
+@@staticmethod
+def factory(segment):
+    """Given a segment of the document that corresponds to a File or
+    Fragment, this factory function determines the kind, name, text
+    and identifiers and returns an initialized CodeElement of the
+    right kind."""
+    @< extract the elements of the code-chunk or die @>
+
+    @< return the proper File or Fragment object @(o@,File@,False@) @>
+    @< return the proper File or Fragment object @(O@,File@,True@) @>
+    @< return the proper File or Fragment object @(d@,Fragment@,False@) @>
+    @< return the proper File or Fragment object @(D@,Fragment@,True@) @>
+@%    if kind == 'o':
+@%        return File(name, text, identifiers, False)
+@%    elif kind == 'O':
+@%        return File(name, text, identifiers, True)
+@%    elif kind == 'd':
+@%        return Fragment(name, text, identifiers, False)
+@%    elif kind == 'D':
+@%        return Fragment(name, text, identifiers, True)
+
+@|factory @}
+
+
+Analyse the code chunk with the \verb|element_matcher| regexp. If this
+is not possible, abort the program. Otherwise, fill in the variables
+\verb|kind|, \verb|name|, \verb|text| and \verb|identifiers|.
+
+@d extract the elements of the code-chunk or die @{
+@< regexp element\_matcher to split up a chunk of code @>
+@%    m = re.match(CodeElement.element_matcher, segment)
+m = re.match(element_matcher, segment)
+try:
+    kind = m.group('kind')
+    name = m.group('name').strip()
+    text = m.group('text')
+    if m.group('identifiers'):
+        identifiers = m.group('identifiers').split()
+    else:
+        identifiers = []
+except:
+    sys.stderr.write("failed CodeElement.factory(%s)\n" % segment)
+    sys.exit(1)
+@| @}
+
+
+
+Return a File or Fragment object, dependent of the type of the code chunk:
+@d return the proper File or Fragment object @{@%
+if kind == '@1':
+    return @2(name, text, identifiers, @3)
+@| @}
+
+
+@< return a File or Fragment object @>
+
+
+
+@d variables in the CodeElement class @{@%
+# The scrap sequence number, used as the index (key) to
+# code_elements.
+scrap_number = 1
+
+@|element_matcher scrap_number @}
+
+@d methods in the CodeElement class @{@%
+    def __lt__(self, other):
+        """Sort by scrap number."""
+        return self.scrap_number < other.scrap_number
+
+@|__lt__ @}
+
+
+@d the CodeElement class @{@%
+    @@staticmethod
+    def write_elements(stream, elements):
+        """'elements' is a list of CodeElements whose page/scrap-on-page
+        references are to be written to 'stream'."""
+        # Start with an impossible page number
+        page = -1
+        for e in elements:
+            try:
+                if e.page_number != page and page != -1:
+                    # Insert a ', ' separator for new pages after the
+                    # first.
+                    stream.write(", ")
+                new_page = e.page_number
+                new_scrap = e.scrap_on_page
+            except:
+                # Ths happens if the page and scrap data hasn't been
+                # set up (probably because there's no .aux file, but
+                # maybe because it's too short; perhaps (e.g.) there's
+                # nuweb code after the \end{document}).
+                global need_to_rerun
+                need_to_rerun = True
+                new_page = '?'
+                new_scrap = '?'
+                stream.write(", ")
+            # Write the link target.
+            stream.write("\\NWlink{nuweb%s%s}"
+                         % (new_page, new_scrap))
+            if new_page != page:
+                # This is a new page, so include the page number in
+                # the link.
+                stream.write("{%s%s}" % (new_page, new_scrap))
+            else:
+                # This is a further element on the same page, so the
+                # link is just the scrap-on-page.
+                stream.write("{%s}" % new_scrap)
+            # Update the page number.
+            page = new_page
+
+@| @}
+
+@d the CodeElement class @{@%
+    def __init__(self, name, text, identifiers, splittable):
+        """'name' is either the file name or the fragment name.
+        'text' is the code (scrap) content.
+        'identifiers' is a list of the identifiers defined by the scrap.
+        'splittable' is True if the text is allowed to be printed over
+        a page boundary in the printed document."""
+
+        self.name = name
+
+        # We want to split into lines, retaining the \n at the end of
+        # all lines that have one already (which may not include the
+        # last, or only, line).
+        # We do this by making sure that all line terminators are \n\r
+        # (NB, not the normal order) and splitting on \r.
+        # We rely on Python to generate \r\n on output if required.
+        text = re.sub(r'\r', '', text)
+        text = re.sub(r'\n', r'\n\r', text)
+        # We need to keep the trailing \n, if there is one, but not to
+        # get an extra empty line because of the split on the trailing
+        # \r.
+        if len(text) > 0 and text[-1] == '\r':
+            text = text[:-1]
+        self.lines = [CodeLine.factory(l) for l in text.split("\r")]
+
+        # We keep the raw text (but only of LiteralLines) to speed up
+        # searching for identifiers.
+        self.literal_text = ''.join([l.text for l in self.lines
+                                     if isinstance(l, LiteralCodeLine)])
+
+        self.identifiers = [[i, Identifier.factory(i)] for i in identifiers]
+        self.splittable = splittable
+        self.scrap_number = CodeElement.scrap_number
+        CodeElement.scrap_number = CodeElement.scrap_number + 1
+        code_elements[self.scrap_number] = self
+@| @}
+
+@d the CodeElement class @{@%
+
+    def __repr__(self):
+        """Provide a printable representation (only for debugging)."""
+        return "%s/%d" % (self.name, self.scrap_number)
+@| @}
+
+@d the CodeElement class @{@%
+    def write_code(self, stream, indent, parameters = []):
+        """Output the code to 'stream', indenting all lines after the
+        first by 'indent', and skipping the last line if it's
+        blank."""
+        self.lines[0].write_code(stream, '', parameters)
+        for l in self.lines[1:]:
+            l.write_code(stream, indent, parameters)
+
+@| @}
+
+@d the CodeElement class @{@%
+    def generate_latex(self, output):
+        output.write("\\begin{flushleft} \\small\n")
+        if not self.splittable:
+            output.write("\\begin{minipage}{\\linewidth}")
+        output.write("\\label{scrap%d}\\raggedright\\small\n"
+                     % self.scrap_number)
+        self.write_title(output)
+        output.write("\\vspace{-1ex}\n")
+        output.write("\\begin{list}{}{} \\item\n")
+        for l in self.lines:
+            l.write_latex(output)
+        output.write("\\mbox{}{\NWsep}\n")
+        output.write("\\end{list}\n")
+        output.write("\\vspace{-1ex}\n")
+        defined_by = self.defined_by()
+        used_identifiers = self.used_identifiers()
+        uses_identifiers = self.uses_identifiers()
+        if len(defined_by) > 1 \
+                or isinstance(self, Fragment) \
+                or len(used_identifiers) > 0 \
+                or len(uses_identifiers) > 0:
+            # We only create this list environment for the
+            # crossreferences if there are any (otherwise, we'd have
+            # to create an empty \item). There's always at least one
+            # item for a Fragment (either 'referenced in' or 'never
+            # referenced').
+            output.write("\\vspace{-1ex}\n")
+            output.write("\\footnotesize\n")
+            output.write("\\begin{list}{}{")
+            output.write("\\setlength{\\itemsep}{-\\parsep}")
+            output.write("\\setlength{\\itemindent}{-\\leftmargin}")
+            output.write("}\n")
+
+            def write_id_and_uses(i):
+                output.write("\\verb@@`'%s@@\\ " % i[0])
+                if len(i[1]) > 0:
+                    CodeElement.write_elements(output, sorted(i[1]))
+                else:
+                    output.write("\\NWtxtIdentsNotUsed")
+
+            if len(defined_by) > 1:
+                output.write("\\item \\NWtxtMacroDefBy\\ ")
+                CodeElement.write_elements(output, sorted(defined_by))
+                output.write(".\n")
+
+            if isinstance(self, Fragment):
+                referenced_in = self.referenced_in()
+                if len(referenced_in) > 0:
+                    output.write("\\item \\NWtxtMacroRefIn\\ ")
+                    CodeElement.write_elements(output, sorted(referenced_in))
+                    output.write(".\n")
+                else:
+                    output.write("\\item \\NWtxtMacroNoRef.\n")
+
+            if len(used_identifiers) > 0:
+                output.write("\\item \\NWtxtIdentsDefed\\ ")
+                for i in used_identifiers[:-1]:
+                    write_id_and_uses(i)
+                    output.write(", ")
+                write_id_and_uses(used_identifiers[-1])
+                output.write(".\\\\\n")
+
+            if len(uses_identifiers) > 0:
+                output.write("\\item \\NWtxtIdentsUsed\\ ")
+                for i in uses_identifiers[:-1]:
+                    write_id_and_uses(i)
+                    output.write(", ")
+                write_id_and_uses(uses_identifiers[-1])
+                output.write(".\\\\\n")
+
+            output.write("\\end{list}\n")
+        if not self.splittable:
+            output.write("\\end{minipage}\n")
+        output.write("\\end{flushleft}\n")
+
+@| @}
+
+@d the CodeElement class @{@%
+    def referenced_in(self):
+        """Returns a list of CodeElements which reference this
+        Fragment."""
+        def invokes_self(code_lines):
+            for l in code_lines:
+                if l.invokes(self.name):
+                    return True;
+            return False;
+        # A Fragment that's referenced but not defined has no code
+        # lines, so don't include it.
+        return [e for e in document
+                if isinstance(e, CodeElement) \
+                    and hasattr(e, 'lines') \
+                    and invokes_self(e.lines)]
+
+@| @}
+
+@d the CodeElement class @{@%
+    def used_identifiers(self):
+        """Returns a list of the identifier definitions made by this
+        CodeElement and their users (except for those that also define
+        the identifier): [[identifier-text, [element]]]."""
+        code = [c for c in document
+                if isinstance(c, CodeElement) and c != self]
+        result = []
+        for i in self.identifiers:
+            elements = []
+            for c in code:
+                if i[1].matches(c.literal_text) \
+                   and not c.defines_identifier(i[0]):
+                    elements.append(c)
+            result.append([i[0], elements])
+        return sorted(result)
+
+@| @}
+
+@d the CodeElement class @{@%
+    def uses_identifiers(self):
+        """Returns a list of all the identifier definitions made by other
+        CodeElements and used in this one (except those that are also
+        defined in this one): [[identifier-text, [element]]]."""
+        code = [c for c in document
+                if isinstance(c, CodeElement) and c != self]
+        matches = {}
+        for c in code:
+            for i in c.identifiers:
+                if i[1].matches(self.literal_text) \
+                   and not self.defines_identifier(i[0]):
+                    value = matches.get(i[0], [])
+                    value.append(c)
+                    matches[i[0]] = value
+        return [[k, matches[k]] for k in sorted(matches.keys())]
+
+@| @}
+
+@d the CodeElement class @{@%
+    def defines_identifier(self, id):
+        """Return True if the Element defines the identifier id."""
+        for i in self.identifiers:
+            if id == i[0]: return True
+        return False
+@| @}
+
+
+
+
+\subsection{Read the nuweb file}
+\label{sec:read-nuwebfile}
 
 A nuweb file consists essentially of an alternation of (\LaTeX{}) texts and
 code-fragments. The function \verb|read_nuweb| converts these
@@ -297,10 +746,6 @@ import re, tempfile, time, sys,@< packages list @>
 # Globals
 #-----------------------------------------------------------------------
 @< global variables in nuweb.py @>
-
-# In 'document', we have the input document as a sequence of
-# DocumentElements.
-document = []
 
 # In 'code_elements' we have all the CodeElements (keyed by scrap
 # number).
@@ -665,315 +1110,8 @@ class AbnormalIdentifier(Identifier):
 #-----------------------------------------------------------------------
 # DocumentElement class and children
 #-----------------------------------------------------------------------
+@< DocumentElement class and children @>
 
-class DocumentElement():
-    """The abstract root of the element classes that make up the
-    document. The document is a sequence of Text, Code and Index
-    elements."""
-    def generate_code(self):
-        pass
-    def generate_latex(self, output):
-        output.write(self.text)
-    def matches(self, identifier):
-        return False
-    def defined_by(self):
-        """Returns a list of other Fragments with the same name, ie
-        which taken together define the whole fragment."""
-        return []
-    def referenced_in(self):
-        """Returns a list of CodeElements which reference this
-        Fragment."""
-        return []
-    def used_identifiers(self):
-        """Returns a list of the identifier definitions made by this
-        CodeElement and their users: [[identifier, [element]]]."""
-        return []
-    def uses_identifiers(self):
-        """Returns a list of all the identifier definitions made by
-        other CodeElements and used in this one:
-        [[identifier-text, [element]]]."""
-        return []
-
-class Text(DocumentElement):
-    """Contains LaTeX text from the original nuweb source file."""
-    def __init__(self, text):
-        self.text = re.sub(r'@@@@', '@@', text)
-
-class CodeElement(DocumentElement):
-    """May be a File or a Fragment.
-
-    'name' is either the file name or the definition name.
-
-    'lines' is the code (scrap) content, which is a list of CodeLines.
-
-    'identifiers' is a list of the identifiers defined by the element
-    expressed as [[identifier-text, Identifier]].
-
-    'literal_text' is the joined content of the LiteralLines (to speed
-    up identifier search).
-
-    'splittable' is True if the text is allowed to be split over a
-    page boundary in the printed document (otherwise a minipage
-    environment is used to prevent splitting)."""
-
-    # Matches a CodeEement for factory(). Take care not to recognise
-    # '@@@@|' or terminate early on "@@@@}" (unusual, but occurs in
-    # nuweb.w).
-    element_matcher = re.compile(r'(?s)'
-                                 + r'@@(?P<kind>[oOdD])'
-                                 + r'\s*'
-                                 + r'(?P<name>.*?)'
-                                 + r'@@{(?P<text>.*?)'
-                                 + r'((?<!@@)@@\|(?P<identifiers>.*))?'
-                                 + r'(?<!@@)@@}')
-
-    # The scrap sequence number, used as the index (key) to
-    # code_elements.
-    scrap_number = 1
-
-    def __lt__(self, other):
-        """Sort by scrap number."""
-        return self.scrap_number < other.scrap_number
-
-    @@staticmethod
-    def factory(segment):
-        """Given a segment of the document that corresponds to a File or
-        Fragment, this factory function determines the kind, name, text
-        and identifiers and returns an initialized CodeElement of the
-        right kind."""
-        m = re.match(CodeElement.element_matcher, segment)
-        try:
-            kind = m.group('kind')
-            name = m.group('name').strip()
-            text = m.group('text')
-            if m.group('identifiers'):
-                identifiers = m.group('identifiers').split()
-            else:
-                identifiers = []
-        except:
-            sys.stderr.write("failed CodeElement.factory(%s)\n" % segment)
-            sys.exit(1)
-        if kind == 'o':
-            return File(name, text, identifiers, False)
-        elif kind == 'O':
-            return File(name, text, identifiers, True)
-        elif kind == 'd':
-            return Fragment(name, text, identifiers, False)
-        elif kind == 'D':
-            return Fragment(name, text, identifiers, True)
-
-    @@staticmethod
-    def write_elements(stream, elements):
-        """'elements' is a list of CodeElements whose page/scrap-on-page
-        references are to be written to 'stream'."""
-        # Start with an impossible page number
-        page = -1
-        for e in elements:
-            try:
-                if e.page_number != page and page != -1:
-                    # Insert a ', ' separator for new pages after the
-                    # first.
-                    stream.write(", ")
-                new_page = e.page_number
-                new_scrap = e.scrap_on_page
-            except:
-                # Ths happens if the page and scrap data hasn't been
-                # set up (probably because there's no .aux file, but
-                # maybe because it's too short; perhaps (e.g.) there's
-                # nuweb code after the \end{document}).
-                global need_to_rerun
-                need_to_rerun = True
-                new_page = '?'
-                new_scrap = '?'
-                stream.write(", ")
-            # Write the link target.
-            stream.write("\\NWlink{nuweb%s%s}"
-                         % (new_page, new_scrap))
-            if new_page != page:
-                # This is a new page, so include the page number in
-                # the link.
-                stream.write("{%s%s}" % (new_page, new_scrap))
-            else:
-                # This is a further element on the same page, so the
-                # link is just the scrap-on-page.
-                stream.write("{%s}" % new_scrap)
-            # Update the page number.
-            page = new_page
-
-    def __init__(self, name, text, identifiers, splittable):
-        """'name' is either the file name or the fragment name.
-        'text' is the code (scrap) content.
-        'identifiers' is a list of the identifiers defined by the scrap.
-        'splittable' is True if the text is allowed to be printed over
-        a page boundary in the printed document."""
-
-        self.name = name
-
-        # We want to split into lines, retaining the \n at the end of
-        # all lines that have one already (which may not include the
-        # last, or only, line).
-        # We do this by making sure that all line terminators are \n\r
-        # (NB, not the normal order) and splitting on \r.
-        # We rely on Python to generate \r\n on output if required.
-        text = re.sub(r'\r', '', text)
-        text = re.sub(r'\n', r'\n\r', text)
-        # We need to keep the trailing \n, if there is one, but not to
-        # get an extra empty line because of the split on the trailing
-        # \r.
-        if len(text) > 0 and text[-1] == '\r':
-            text = text[:-1]
-        self.lines = [CodeLine.factory(l) for l in text.split("\r")]
-
-        # We keep the raw text (but only of LiteralLines) to speed up
-        # searching for identifiers.
-        self.literal_text = ''.join([l.text for l in self.lines
-                                     if isinstance(l, LiteralCodeLine)])
-
-        self.identifiers = [[i, Identifier.factory(i)] for i in identifiers]
-        self.splittable = splittable
-        self.scrap_number = CodeElement.scrap_number
-        CodeElement.scrap_number = CodeElement.scrap_number + 1
-        code_elements[self.scrap_number] = self
-
-    def __repr__(self):
-        """Provide a printable representation (only for debugging)."""
-        return "%s/%d" % (self.name, self.scrap_number)
-
-    def write_code(self, stream, indent, parameters = []):
-        """Output the code to 'stream', indenting all lines after the
-        first by 'indent', and skipping the last line if it's
-        blank."""
-        self.lines[0].write_code(stream, '', parameters)
-        for l in self.lines[1:]:
-            l.write_code(stream, indent, parameters)
-
-    def generate_latex(self, output):
-        output.write("\\begin{flushleft} \\small\n")
-        if not self.splittable:
-            output.write("\\begin{minipage}{\\linewidth}")
-        output.write("\\label{scrap%d}\\raggedright\\small\n"
-                     % self.scrap_number)
-        self.write_title(output)
-        output.write("\\vspace{-1ex}\n")
-        output.write("\\begin{list}{}{} \\item\n")
-        for l in self.lines:
-            l.write_latex(output)
-        output.write("\\mbox{}{\NWsep}\n")
-        output.write("\\end{list}\n")
-        output.write("\\vspace{-1ex}\n")
-        defined_by = self.defined_by()
-        used_identifiers = self.used_identifiers()
-        uses_identifiers = self.uses_identifiers()
-        if len(defined_by) > 1 \
-                or isinstance(self, Fragment) \
-                or len(used_identifiers) > 0 \
-                or len(uses_identifiers) > 0:
-            # We only create this list environment for the
-            # crossreferences if there are any (otherwise, we'd have
-            # to create an empty \item). There's always at least one
-            # item for a Fragment (either 'referenced in' or 'never
-            # referenced').
-            output.write("\\vspace{-1ex}\n")
-            output.write("\\footnotesize\n")
-            output.write("\\begin{list}{}{")
-            output.write("\\setlength{\\itemsep}{-\\parsep}")
-            output.write("\\setlength{\\itemindent}{-\\leftmargin}")
-            output.write("}\n")
-
-            def write_id_and_uses(i):
-                output.write("\\verb@@`'%s@@\\ " % i[0])
-                if len(i[1]) > 0:
-                    CodeElement.write_elements(output, sorted(i[1]))
-                else:
-                    output.write("\\NWtxtIdentsNotUsed")
-
-            if len(defined_by) > 1:
-                output.write("\\item \\NWtxtMacroDefBy\\ ")
-                CodeElement.write_elements(output, sorted(defined_by))
-                output.write(".\n")
-
-            if isinstance(self, Fragment):
-                referenced_in = self.referenced_in()
-                if len(referenced_in) > 0:
-                    output.write("\\item \\NWtxtMacroRefIn\\ ")
-                    CodeElement.write_elements(output, sorted(referenced_in))
-                    output.write(".\n")
-                else:
-                    output.write("\\item \\NWtxtMacroNoRef.\n")
-
-            if len(used_identifiers) > 0:
-                output.write("\\item \\NWtxtIdentsDefed\\ ")
-                for i in used_identifiers[:-1]:
-                    write_id_and_uses(i)
-                    output.write(", ")
-                write_id_and_uses(used_identifiers[-1])
-                output.write(".\\\\\n")
-
-            if len(uses_identifiers) > 0:
-                output.write("\\item \\NWtxtIdentsUsed\\ ")
-                for i in uses_identifiers[:-1]:
-                    write_id_and_uses(i)
-                    output.write(", ")
-                write_id_and_uses(uses_identifiers[-1])
-                output.write(".\\\\\n")
-
-            output.write("\\end{list}\n")
-        if not self.splittable:
-            output.write("\\end{minipage}\n")
-        output.write("\\end{flushleft}\n")
-
-    def referenced_in(self):
-        """Returns a list of CodeElements which reference this
-        Fragment."""
-        def invokes_self(code_lines):
-            for l in code_lines:
-                if l.invokes(self.name):
-                    return True;
-            return False;
-        # A Fragment that's referenced but not defined has no code
-        # lines, so don't include it.
-        return [e for e in document
-                if isinstance(e, CodeElement) \
-                    and hasattr(e, 'lines') \
-                    and invokes_self(e.lines)]
-
-    def used_identifiers(self):
-        """Returns a list of the identifier definitions made by this
-        CodeElement and their users (except for those that also define
-        the identifier): [[identifier-text, [element]]]."""
-        code = [c for c in document
-                if isinstance(c, CodeElement) and c != self]
-        result = []
-        for i in self.identifiers:
-            elements = []
-            for c in code:
-                if i[1].matches(c.literal_text) \
-                   and not c.defines_identifier(i[0]):
-                    elements.append(c)
-            result.append([i[0], elements])
-        return sorted(result)
-
-    def uses_identifiers(self):
-        """Returns a list of all the identifier definitions made by other
-        CodeElements and used in this one (except those that are also
-        defined in this one): [[identifier-text, [element]]]."""
-        code = [c for c in document
-                if isinstance(c, CodeElement) and c != self]
-        matches = {}
-        for c in code:
-            for i in c.identifiers:
-                if i[1].matches(self.literal_text) \
-                   and not self.defines_identifier(i[0]):
-                    value = matches.get(i[0], [])
-                    value.append(c)
-                    matches[i[0]] = value
-        return [[k, matches[k]] for k in sorted(matches.keys())]
-
-    def defines_identifier(self, id):
-        """Return True if the Element defines the identifier id."""
-        for i in self.identifiers:
-            if id == i[0]: return True
-        return False
 
 class File(CodeElement):
     """Forms part of a named file. The whole file is composed of all
